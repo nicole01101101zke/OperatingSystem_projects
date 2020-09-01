@@ -1,0 +1,290 @@
+diff --git a/include/unistd.h b/include/unistd.h
+index 9d13199..3a1b155 100644
+--- a/include/unistd.h
++++ b/include/unistd.h
+@@ -100,6 +100,7 @@ size_t	 confstr(int, char *, size_t);
+ /* also declared in stdio.h */
+ char	*cuserid(char *);	/* obsolete */
+ #endif /* __CUSERID_DECLARED */
++int chrt(long deadline); 
+ int	 dup(int);
+ int	 dup2(int, int);
+ int	 execl(const char *, const char *, ...);
+diff --git a/minix/commands/service/parse.c b/minix/commands/service/parse.c
+index 478d2fa..7715ab5 100644
+--- a/minix/commands/service/parse.c
++++ b/minix/commands/service/parse.c
+@@ -827,6 +827,7 @@ struct
+ } system_tab[]=
+ {
+ 	{ "PRIVCTL",		SYS_PRIVCTL },
++	{ "CHRT",		SYS_CHRT },
+ 	{ "TRACE",		SYS_TRACE },
+ 	{ "KILL",		SYS_KILL },
+ 	{ "UMAP",		SYS_UMAP },
+diff --git a/minix/include/minix/callnr.h b/minix/include/minix/callnr.h
+index 6030687..aeff232 100644
+--- a/minix/include/minix/callnr.h
++++ b/minix/include/minix/callnr.h
+@@ -11,6 +11,7 @@
+ #define IS_PM_CALL(type)	(((type) & ~0xff) == PM_BASE)
+ 
+ /* Message type 0 is traditionally reserved. */
++#define PM_CHRT			(PM_BASE + 48)
+ #define PM_EXIT			(PM_BASE + 1)
+ #define PM_FORK			(PM_BASE + 2)
+ #define PM_WAITPID		(PM_BASE + 3)
+@@ -59,7 +60,7 @@
+ #define PM_GETPROCNR		(PM_BASE + 46)
+ #define PM_GETSYSINFO		(PM_BASE + 47)
+ 
+-#define NR_PM_CALLS		48	/* highest number from base plus one */
++#define NR_PM_CALLS		49	/* highest number from base plus one */
+ 
+ /*===========================================================================*
+  *				Calls to VFS				     *
+diff --git a/minix/include/minix/com.h b/minix/include/minix/com.h
+index 637f77c..1ec9765 100644
+--- a/minix/include/minix/com.h
++++ b/minix/include/minix/com.h
+@@ -262,9 +262,10 @@
+ #  define SYS_SAFEMEMSET (KERNEL_CALL + 56)	/* sys_safememset() */
+ 
+ #  define SYS_PADCONF (KERNEL_CALL + 57)	/* sys_padconf() */
++#  define SYS_CHRT (KERNEL_CALL + 58)	/*sys_chrt()*/
+ 
+ /* Total */
+-#define NR_SYS_CALLS	58	/* number of kernel calls */
++#define NR_SYS_CALLS	59	/* number of kernel calls */
+ 
+ #define SYS_CALL_MASK_SIZE BITMAP_CHUNKS(NR_SYS_CALLS)
+ 
+diff --git a/minix/include/minix/syslib.h b/minix/include/minix/syslib.h
+index a9ac487..76a7dde 100644
+--- a/minix/include/minix/syslib.h
++++ b/minix/include/minix/syslib.h
+@@ -28,6 +28,7 @@ int _taskcall(endpoint_t who, int syscallnr, message *msgptr);
+ int _kernel_call(int syscallnr, message *msgptr);
+ 
+ int sys_abort(int how);
++int sys_chrt(endpoint_t proc_ep, long deadline);
+ int sys_enable_iop(endpoint_t proc_ep);
+ int sys_exec(endpoint_t proc_ep, vir_bytes stack_ptr, vir_bytes progname,
+ 	vir_bytes pc, vir_bytes ps_str);
+diff --git a/minix/kernel/config.h b/minix/kernel/config.h
+index a99b299..0da0c9f 100644
+--- a/minix/kernel/config.h
++++ b/minix/kernel/config.h
+@@ -19,6 +19,7 @@
+ #define USE_NEWMAP     	   1	/* set a new memory map */
+ #define USE_EXEC       	   1	/* update process after execute */
+ #define USE_CLEAR	   1	/* clean up after process exit */
++#define USE_CHRT		1
+ #define USE_EXIT	   1	/* a system process wants to exit */
+ #define USE_TRACE          1	/* process information and tracing */
+ #define USE_GETKSIG    	   1	/* retrieve pending kernel signals */
+diff --git a/minix/kernel/proc.c b/minix/kernel/proc.c
+index 3dff67c..8d44b70 100644
+--- a/minix/kernel/proc.c
++++ b/minix/kernel/proc.c
+@@ -134,6 +134,7 @@ void proc_init(void)
+ 		rp->p_scheduler = NULL;		/* no user space scheduler */
+ 		rp->p_priority = 0;		/* no priority */
+ 		rp->p_quantum_size_ms = 0;	/* no quantum size */
++		rp->deadline=0;
+ 
+ 		/* arch-specific initialization */
+ 		arch_proc_reset(rp);
+@@ -1535,6 +1536,12 @@ void enqueue(
+  * This function can be used x-cpu as it always uses the queues of the cpu the
+  * process is assigned to.
+  */
++
++  
++  if (rp->deadline>0){    /*the highest priority of user process*/
++	  rp->p_priority = 5;
++  }
++
+   int q = rp->p_priority;	 		/* scheduling queue to use */
+   struct proc **rdy_head, **rdy_tail;
+   
+@@ -1600,6 +1607,11 @@ void enqueue(
+  */
+ static void enqueue_head(struct proc *rp)
+ {
++  
++  if (rp->deadline>0){    /*the highest priority of user process*/
++	  rp->p_priority = 5;
++  }
++  
+   const int q = rp->p_priority;	 		/* scheduling queue to use */
+ 
+   struct proc **rdy_head, **rdy_tail;
+@@ -1720,6 +1732,8 @@ static struct proc * pick_proc(void)
+  * This function always uses the run queues of the local cpu!
+  */
+   register struct proc *rp;			/* process to run */
++  register struct proc *tmp;
++
+   struct proc **rdy_head;
+   int q;				/* iterate over queues */
+ 
+@@ -1733,6 +1747,17 @@ static struct proc * pick_proc(void)
+ 		TRACE(VF_PICKPROC, printf("cpu %d queue %d empty\n", cpuid, q););
+ 		continue;
+ 	}
++	if (q == 5) {
++		rp =rdy_head[q];
++		tmp = rp->p_nextready;
++		while (tmp!=NULL){
++			if (tmp->deadline>0 && (rp->deadline==0 || (rp->deadline>0 && tmp->deadline<rp->deadline))){
++			if (proc_is_runnable(tmp))
++				rp = tmp;
++			}
++			tmp=tmp->p_nextready;
++		}
++	}
+ 	assert(proc_is_runnable(rp));
+ 	if (priv(rp)->s_flags & BILLABLE)	 	
+ 		get_cpulocal_var(bill_ptr) = rp; /* bill for system time */
+diff --git a/minix/kernel/proc.h b/minix/kernel/proc.h
+index f311535..ad773fe 100644
+--- a/minix/kernel/proc.h
++++ b/minix/kernel/proc.h
+@@ -60,6 +60,8 @@ struct proc {
+   clock_t p_virt_left;		/* number of ticks left on virtual timer */
+   clock_t p_prof_left;		/* number of ticks left on profile timer */
+ 
++  long deadline;
++
+   u64_t p_cycles;		/* how many cycles did the process use */
+   u64_t p_kcall_cycles;		/* kernel cycles caused by this proc (kcall) */
+   u64_t p_kipc_cycles;		/* cycles caused by this proc (ipc) */
+@@ -149,6 +151,7 @@ struct proc {
+ #define RTS_PAGEFAULT	0x400	/* process has unhandled pagefault */
+ #define RTS_VMREQUEST	0x800	/* originator of vm memory request */
+ #define RTS_VMREQTARGET	0x1000	/* target of vm memory request */
++//#define RTS_SYS_LOCK	0x2000	/* temporary process lock flag for systask */
+ #define RTS_PREEMPTED	0x4000	/* this process was preempted by a higher
+ 				   priority process and we should pick a new one
+ 				   to run. Processes with this flag should be
+diff --git a/minix/kernel/system.c b/minix/kernel/system.c
+index 2d1aee1..3b5332a 100644
+--- a/minix/kernel/system.c
++++ b/minix/kernel/system.c
+@@ -200,6 +200,7 @@ void system_init(void)
+   map(SYS_RUNCTL, do_runctl);		/* set/clear stop flag of a process */
+   map(SYS_UPDATE, do_update);		/* update a process into another */
+   map(SYS_STATECTL, do_statectl);	/* let a process control its state */
++  map(SYS_CHRT, do_chrt);	/*process time limit*/
+ 
+   /* Signal handling. */
+   map(SYS_KILL, do_kill); 		/* cause a process to be signaled */
+diff --git a/minix/kernel/system.h b/minix/kernel/system.h
+index d7bd99b..d5598f3 100644
+--- a/minix/kernel/system.h
++++ b/minix/kernel/system.h
+@@ -32,6 +32,11 @@
+ 
+ #include "kernel/kernel.h"
+ 
++int do_chrt(struct proc * caller,message *m_ptr);
++#if ! USE_CHRT
++#define do_chrt NULL
++#endif
++
+ int do_exec(struct proc * caller, message *m_ptr);
+ #if ! USE_EXEC
+ #define do_exec NULL
+diff --git a/minix/kernel/system/Makefile.inc b/minix/kernel/system/Makefile.inc
+index ef8cf2e..4abc9bb 100644
+--- a/minix/kernel/system/Makefile.inc
++++ b/minix/kernel/system/Makefile.inc
+@@ -4,6 +4,7 @@
+ .PATH:	${.CURDIR}/system
+ SRCS+= 	\
+ 	do_fork.c \
++	do_chrt.c \
+ 	do_exec.c \
+ 	do_clear.c \
+ 	do_exit.c \
+diff --git a/minix/lib/libc/sys/Makefile.inc b/minix/lib/libc/sys/Makefile.inc
+index 38fa560..297025d 100644
+--- a/minix/lib/libc/sys/Makefile.inc
++++ b/minix/lib/libc/sys/Makefile.inc
+@@ -1,7 +1,7 @@
+ .PATH:	${NETBSDSRCDIR}/minix/lib/libc/sys
+ 
+ SRCS+= 	accept.c access.c adjtime.c bind.c brk.c sbrk.c m_closefrom.c getsid.c \
+-	chdir.c chmod.c fchmod.c chown.c fchown.c chroot.c close.c \
++	chdir.c chmod.c fchmod.c chown.c fchown.c chroot.c chrt.c close.c \
+ 	clock_getres.c clock_gettime.c clock_settime.c \
+ 	connect.c dup.c dup2.c execve.c fcntl.c flock.c fpathconf.c fork.c \
+ 	fstatfs.c fstatvfs.c fsync.c ftruncate.c gcov_flush_sys.c getdents.c \
+diff --git a/minix/lib/libsys/Makefile b/minix/lib/libsys/Makefile
+index e926f69..67be108 100644
+--- a/minix/lib/libsys/Makefile
++++ b/minix/lib/libsys/Makefile
+@@ -50,6 +50,7 @@ SRCS+=  \
+ 	srv_kill.c \
+ 	stacktrace.c \
+ 	sys_abort.c \
++	sys_chrt.c \
+ 	sys_clear.c \
+ 	sys_cprof.c \
+ 	sys_diagctl.c \
+diff --git a/minix/servers/pm/misc.c b/minix/servers/pm/misc.c
+index 8014f63..a65673c 100644
+--- a/minix/servers/pm/misc.c
++++ b/minix/servers/pm/misc.c
+@@ -120,6 +120,24 @@ int do_sysuname()
+   return(n);
+ }
+ 
++/*===========================================================================*
++ *				do_chrt				     *
++ *===========================================================================*/
++ int do_chrt() 
++{ 
++  sys_chrt(who_p,m_in.m2_l1);
++  return OK;
++}
++/*	message m;
++	m.RA_PROC_NR = who_p;
++	m.RA_DEADLINE = m_in.deadline;
++	return(_taskcall(SYSTASK,SYS_CHRT,&m));
++ int r;
++  if(r = sys_chrt(who_p, m_in.deadline) != OK)
++  	return 1;
++  return 0; 
++ }*/
++
+ 
+ /*===========================================================================*
+  *				do_getsysinfo			       	     *
+diff --git a/minix/servers/pm/proto.h b/minix/servers/pm/proto.h
+index 0d27fc8..5f2e3bb 100644
+--- a/minix/servers/pm/proto.h
++++ b/minix/servers/pm/proto.h
+@@ -9,6 +9,9 @@ int do_itimer(void);
+ void set_alarm(struct mproc *rmp, clock_t ticks);
+ void check_vtimer(int proc_nr, int sig);
+ 
++/*chrt.c*/
++int do_chrt(void);
++
+ /* exec.c */
+ int do_exec(void);
+ int do_newexec(void);
+diff --git a/minix/servers/pm/table.c b/minix/servers/pm/table.c
+index 8c8e24a..ccf8a66 100644
+--- a/minix/servers/pm/table.c
++++ b/minix/servers/pm/table.c
+@@ -12,6 +12,7 @@
+ #define CALL(n)	[((n) - PM_BASE)]
+ 
+ int (* const call_vec[NR_PM_CALLS])(void) = {
++	CALL(PM_CHRT)		= do_chrt,			/*sys_chrt()*/
+ 	CALL(PM_EXIT)		= do_exit,		/* _exit(2) */
+ 	CALL(PM_FORK)		= do_fork,		/* fork(2) */
+ 	CALL(PM_WAITPID)	= do_waitpid,		/* waitpid(2) */
